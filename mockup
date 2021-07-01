@@ -1,6 +1,5 @@
-# kubectl-otc-login
-Single Sign On for OTC
-- otc-login: Login over OTC
+Auto Fetch kubectl config
+
 Usage:
   otc-login -h | --help
   otc-login -v | --version
@@ -8,9 +7,8 @@ Usage:
 Options:
   -h --help                                 Show this screen.
   -v --version                              Show version.
-  --projectId <projectId>                 OTC Project ID
-  --cluster <cluster>                     Name of the Kubernetes Cluster
-  # Authentication over OTC
-  --token <token>                             Authentication Token for OTC
-  --ak <ak>                                   Access Key for OTC Authentication
-  --sk <sk>                                   Secret Key for OTC Authentication
+  --projectName <projectId>                	OTC Project Name. If omitted, the OS_PROJECT_NAME environment variable are used.
+  --cluster <cluster>                		Name of the Kubernetes Cluster
+  --token <token>                         	Authentication Token for OTC
+  --ak <ak>                            		Access Key for OTC Authentication. If omitted, the OS_ACCESS_KEY environment variable is used.
+  --sk <sk>                            		Secret Key for OTC Authentication. If omitted, the OS_SECRET_KEY environment variable is used.
