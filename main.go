@@ -15,7 +15,7 @@ limitations under the License.
 */
 package main
 
-import "github.com/nano3k0a/kubectl-otc-login/cmd"
+import "main/cmd"
 
 func main() {
 	cmd.Execute()
