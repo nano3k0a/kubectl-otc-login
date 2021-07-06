@@ -17,15 +17,11 @@ package cmd
 
 import (
 	"fmt"
-	"io/ioutil"
-	"k8s.io/kops/pkg/kubeconfig"
-
-	//"github.com/ghodss/yaml"
 	"github.com/opentelekomcloud/gophertelekomcloud"
 	"github.com/opentelekomcloud/gophertelekomcloud/openstack"
-	"github.com/opentelekomcloud/gophertelekomcloud/openstack/cce/v3/clusters"
+	clusterApi "github.com/opentelekomcloud/gophertelekomcloud/openstack/cce/v3/clusters"
 	"github.com/spf13/cobra"
-
+	"io/ioutil"
 	"os"
 	"sigs.k8s.io/yaml"
 )
@@ -96,149 +92,58 @@ func genClient() error {
 		return err
 	}
 
-	listOpts := clusters.ListOpts{}
-	allClusters, err := clusters.List(cceServiceClient, listOpts)
+	listOpts := clusterApi.ListOpts{}
+	allClusters, err := clusterApi.List(cceServiceClient, listOpts) //TODO Fetch only one cluster not a whole list, user needs to provide clustername
 	if err != nil {
 		return err
 	}
 
 	singleCluster := allClusters[0]
 
-	//fmt.Printf("%v\n", allClusters[0])
-	/*
-		for _, cluster := range allClusters {
-			fmt.Printf("%v\n", cluster)
-		}
-	*/
-	kubectlCluster := kubeconfig.KubectlCluster{}
-	kubectlUser := kubeconfig.KubectlUser{}
-	kubectlContext := kubeconfig.KubectlContext{}
-	cert, err := clusters.GetCert(cceServiceClient, singleCluster.Metadata.Id).Extract()
+	cert, err := clusterApi.GetCert(cceServiceClient, singleCluster.Metadata.Id).Extract()
 
-	for k, v := range cert.Clusters {
+	contextName := "OTC-123542-eu-de-pfau-infrastructure" //TODO replace me with ${TENANT-NAME}-${PROJECT-NAME}-${CLUSTER-NAME}
+	userName := "ferhat"
+
+	prepareKubectlConfig(cert, contextName, userName)
+
+	y, err := yaml.Marshal(cert)
+	if err != nil {
+		return err
+	}
+	err = ioutil.WriteFile("/home/victor/test.yaml", y, 0777)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func prepareKubectlConfig(cert *clusterApi.Certificate, contextName string, userName string) {
+	cert.Clusters = createCluster(cert.Clusters, contextName)
+	cert.CurrentContext = contextName
+	cert.Users = []clusterApi.CertUsers{{userName, cert.Users[0].User}}
+	cert.Contexts = createContext(cert, contextName, userName)
+}
+
+func createContext(cert *clusterApi.Certificate, contextName string, userName string) []clusterApi.CertContexts {
+	for _, v := range cert.Contexts {
+		if v.Name == "external" {
+			v.Name = contextName
+			v.Context.User = userName
+			v.Context.Cluster = contextName
+			return []clusterApi.CertContexts{v}
+		}
+	}
+	return nil
+}
+
+func createCluster(clusters []clusterApi.CertClusters, contextName string) []clusterApi.CertClusters {
+	for _, v := range clusters {
 		if v.Name == "externalCluster" {
-			kubectlCluster.Server = v.Cluster.Server
-			kubectlCluster.CertificateAuthorityData = []byte(v.Cluster.CertAuthorityData)
-			kubectlUser.ClientKeyData = []byte(cert.Users[k-1].User.ClientKeyData)
-			kubectlUser.ClientCertificateData = []byte(cert.Users[k-1].User.ClientCertData)
-			kubectlUser.Username = cert.Users[k-1].Name
-			kubectlContext.Cluster = cert.CurrentContext
-			kubectlContext.User = cert.Contexts[k-1].Context.User
+			v.Name = contextName
+			return []clusterApi.CertClusters{v}
 		}
 	}
-	config := &kubeconfig.KubectlConfig{
-		ApiVersion: cert.ApiVersion,
-		Kind:       cert.Kind,
-		Users: []*kubeconfig.KubectlUserWithName{
-			{
-				Name: kubectlUser.Username,
-				User: kubectlUser,
-			},
-		},
-		Clusters: []*kubeconfig.KubectlClusterWithName{
-			{
-				Name:    kubectlCluster.Server,
-				Cluster: kubectlCluster,
-			},
-		},
-		Contexts: []*kubeconfig.KubectlContextWithName{
-			{
-				Name: kubectlContext.Cluster,
-				Context: kubeconfig.KubectlContext{
-					Cluster: kubectlContext.Cluster,
-					User:    kubectlContext.User,
-				},
-			},
-		},
-		CurrentContext: cert.CurrentContext,
-	}
-
-	//cnf, err := clientcmd.LoadFromFile("/home/ferhat/.kube/config")
-	if err != nil {
-		return err
-	}
-	cert.Clusters[0].Name = allClusters[0].Metadata.Name
-
-	y, err := yaml.Marshal(config)
-	if err != nil {
-		return err
-	}
-
-	err = ioutil.WriteFile("/home/ferhat/test.yaml", y, 0777)
-	if err != nil {
-		return err
-	}
-
-	/*
-		user := kubeconfig.KubectlUser {
-			ClientCertificateData: cert.Users[0].User.ClientCertData,
-			ClientKeyData:         cert.Users[0].User.ClientKeyData,
-		}
-		cluster := kubeconfig.KubectlCluster{
-			CertificateAuthorityData: cert.Clusters[0].Cluster.CertAuthorityData,
-			Server:                   cert.Clusters[0].Cluster.Server,
-		}
-
-		myKubeConfig := &kubeconfig.KubectlConfig{
-			Kind:           allClusters[0].Kind,
-			ApiVersion:     allClusters[0].ApiVersion,
-			CurrentContext: cert.CurrentContext,
-			Clusters:       []*kubeconfig.KubectlClusterWithName{
-				{
-					Name:    "local",
-					Cluster: cluster,
-				},
-			},
-			Contexts:       []*kubeconfig.KubectlContextWithName{
-				{
-					Name: "service-account-context",
-					Context: kubeconfig.KubectlContext{
-						Cluster: allClusters[0].Metadata.Name,
-						User:    cert.Contexts[0].Name,
-					},
-				},
-			},
-			Users:          []*kubeconfig.KubectlUserWithName{
-				{
-					Name: cert.Users[0].Name,
-					User: user,
-				},
-			},
-		}
-
-
-		yaml, err := yaml.Marshal(myKubeConfig)
-		if err != nil {
-			return fmt.Errorf("error marshaling kubeconfig to yaml: %v", err)
-		}
-		err = ioutil.WriteFile("test.yaml",yaml,0777)
-		if err != nil {
-			return err
-		}
-
-
-		/*
-		y, err := yaml.Marshal(cert)
-		if err != nil {
-			return err
-		}
-
-		var clusters map[string]*clientcmdapi.Cluster
-		clusters["name"] = cert
-
-		kconf := clientcmdapi.NewConfig()
-		kconf.Kind = allClusters[0].Kind
-		kconf.Clusters = clusters
-
-		cnf, _ := clientcmd.Load(y)
-		//cnf, _ := clientcmd.RESTConfigFromKubeConfig(y)
-		//kubeconfig, _ := clientcmd.BuildConfigFromKubeconfigGetter(cnf)
-
-
-		err = clientcmd.WriteToFile(*cnf, "/home/ferhat/test.yaml")
-		if err != nil{
-			return err
-		}
-	*/
 	return nil
 }
