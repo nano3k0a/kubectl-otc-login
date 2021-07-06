@@ -17,11 +17,17 @@ package cmd
 
 import (
 	"fmt"
+	"io/ioutil"
+	"k8s.io/kops/pkg/kubeconfig"
+
+	//"github.com/ghodss/yaml"
 	"github.com/opentelekomcloud/gophertelekomcloud"
 	"github.com/opentelekomcloud/gophertelekomcloud/openstack"
 	"github.com/opentelekomcloud/gophertelekomcloud/openstack/cce/v3/clusters"
 	"github.com/spf13/cobra"
+
 	"os"
+	"sigs.k8s.io/yaml"
 )
 
 var token string
@@ -72,7 +78,6 @@ func genClient() error {
 	opts := golangsdk.AKSKAuthOptions{
 		IdentityEndpoint: "https://iam.eu-de.otc.t-systems.com/",
 		ProjectId:        "cbfdd6db47e8447d8bc181cf9420194f",
-		Domain:           "OTC-EU-DE-00000000001000038596",
 		SecretKey:        sk,
 		AccessKey:        ak,
 	}
@@ -85,21 +90,155 @@ func genClient() error {
 	endOpts := golangsdk.EndpointOpts{
 		Region: "eu-de",
 	}
-	cceClient, err := openstack.NewCCE(provider, endOpts)
+
+	cceServiceClient, err := openstack.NewCCE(provider, endOpts)
 	if err != nil {
 		return err
 	}
 
 	listOpts := clusters.ListOpts{}
-	allClusters, err := clusters.List(cceClient, listOpts)
-
+	allClusters, err := clusters.List(cceServiceClient, listOpts)
 	if err != nil {
 		return err
 	}
 
-	for _, cluster := range allClusters {
-		fmt.Printf("%v\n", cluster)
+	singleCluster := allClusters[0]
+
+	//fmt.Printf("%v\n", allClusters[0])
+	/*
+		for _, cluster := range allClusters {
+			fmt.Printf("%v\n", cluster)
+		}
+	*/
+	kubectlCluster := kubeconfig.KubectlCluster{}
+	kubectlUser := kubeconfig.KubectlUser{}
+	kubectlContext := kubeconfig.KubectlContext{}
+	cert, err := clusters.GetCert(cceServiceClient, singleCluster.Metadata.Id).Extract()
+
+	for k, v := range cert.Clusters {
+		if v.Name == "externalCluster" {
+			kubectlCluster.Server = v.Cluster.Server
+			kubectlCluster.CertificateAuthorityData = []byte(v.Cluster.CertAuthorityData)
+			kubectlUser.ClientKeyData = []byte(cert.Users[k-1].User.ClientKeyData)
+			kubectlUser.ClientCertificateData = []byte(cert.Users[k-1].User.ClientCertData)
+			kubectlUser.Username = cert.Users[k-1].Name
+			kubectlContext.Cluster = cert.CurrentContext
+			kubectlContext.User = cert.Contexts[k-1].Context.User
+		}
+	}
+	config := &kubeconfig.KubectlConfig{
+		ApiVersion: cert.ApiVersion,
+		Kind:       cert.Kind,
+		Users: []*kubeconfig.KubectlUserWithName{
+			{
+				Name: kubectlUser.Username,
+				User: kubectlUser,
+			},
+		},
+		Clusters: []*kubeconfig.KubectlClusterWithName{
+			{
+				Name:    kubectlCluster.Server,
+				Cluster: kubectlCluster,
+			},
+		},
+		Contexts: []*kubeconfig.KubectlContextWithName{
+			{
+				Name: kubectlContext.Cluster,
+				Context: kubeconfig.KubectlContext{
+					Cluster: kubectlContext.Cluster,
+					User:    kubectlContext.User,
+				},
+			},
+		},
+		CurrentContext: cert.CurrentContext,
 	}
 
+	//cnf, err := clientcmd.LoadFromFile("/home/ferhat/.kube/config")
+	if err != nil {
+		return err
+	}
+	cert.Clusters[0].Name = allClusters[0].Metadata.Name
+
+	y, err := yaml.Marshal(config)
+	if err != nil {
+		return err
+	}
+
+	err = ioutil.WriteFile("/home/ferhat/test.yaml", y, 0777)
+	if err != nil {
+		return err
+	}
+
+	/*
+		user := kubeconfig.KubectlUser {
+			ClientCertificateData: cert.Users[0].User.ClientCertData,
+			ClientKeyData:         cert.Users[0].User.ClientKeyData,
+		}
+		cluster := kubeconfig.KubectlCluster{
+			CertificateAuthorityData: cert.Clusters[0].Cluster.CertAuthorityData,
+			Server:                   cert.Clusters[0].Cluster.Server,
+		}
+
+		myKubeConfig := &kubeconfig.KubectlConfig{
+			Kind:           allClusters[0].Kind,
+			ApiVersion:     allClusters[0].ApiVersion,
+			CurrentContext: cert.CurrentContext,
+			Clusters:       []*kubeconfig.KubectlClusterWithName{
+				{
+					Name:    "local",
+					Cluster: cluster,
+				},
+			},
+			Contexts:       []*kubeconfig.KubectlContextWithName{
+				{
+					Name: "service-account-context",
+					Context: kubeconfig.KubectlContext{
+						Cluster: allClusters[0].Metadata.Name,
+						User:    cert.Contexts[0].Name,
+					},
+				},
+			},
+			Users:          []*kubeconfig.KubectlUserWithName{
+				{
+					Name: cert.Users[0].Name,
+					User: user,
+				},
+			},
+		}
+
+
+		yaml, err := yaml.Marshal(myKubeConfig)
+		if err != nil {
+			return fmt.Errorf("error marshaling kubeconfig to yaml: %v", err)
+		}
+		err = ioutil.WriteFile("test.yaml",yaml,0777)
+		if err != nil {
+			return err
+		}
+
+
+		/*
+		y, err := yaml.Marshal(cert)
+		if err != nil {
+			return err
+		}
+
+		var clusters map[string]*clientcmdapi.Cluster
+		clusters["name"] = cert
+
+		kconf := clientcmdapi.NewConfig()
+		kconf.Kind = allClusters[0].Kind
+		kconf.Clusters = clusters
+
+		cnf, _ := clientcmd.Load(y)
+		//cnf, _ := clientcmd.RESTConfigFromKubeConfig(y)
+		//kubeconfig, _ := clientcmd.BuildConfigFromKubeconfigGetter(cnf)
+
+
+		err = clientcmd.WriteToFile(*cnf, "/home/ferhat/test.yaml")
+		if err != nil{
+			return err
+		}
+	*/
 	return nil
 }
