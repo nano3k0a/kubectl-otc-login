@@ -16,9 +16,6 @@ limitations under the License.
 package cmd
 
 import (
-	"crypto/x509"
-	"encoding/base64"
-	"encoding/xml"
 	"errors"
 	"fmt"
 	golangsdk "github.com/opentelekomcloud/gophertelekomcloud"
@@ -26,11 +23,13 @@ import (
 	"github.com/opentelekomcloud/gophertelekomcloud/openstack/cce/v3/clusters"
 	"github.com/opentelekomcloud/gophertelekomcloud/openstack/identity/v3/users"
 	saml2 "github.com/russellhaering/gosaml2"
-	"github.com/russellhaering/gosaml2/types"
-	dsig "github.com/russellhaering/goxmldsig"
 	"github.com/spf13/cobra"
 	"io/ioutil"
+	"log"
 	"net/http"
+	"os/exec"
+	"runtime"
+
 	//"encoding/json"
 	"os"
 	"sigs.k8s.io/yaml"
@@ -151,111 +150,127 @@ func getProviderClient() *golangsdk.ProviderClient {
 	return provider
 }
 
+func openbrowser(url string) {
+	var err error
+
+	switch runtime.GOOS {
+	case "linux":
+		err = exec.Command("xdg-open", url).Start()
+	case "windows":
+		err = exec.Command("rundll32", "url.dll,FileProtocolHandler", url).Start()
+	case "darwin":
+		err = exec.Command("open", url).Start()
+	default:
+		err = fmt.Errorf("unsupported platform")
+	}
+	if err != nil {
+		log.Fatal(err)
+	}
+
+}
+
 func getSAMLIdentity() {
-	res, err := http.Get("https://auth-pfau.telekom.de/auth/realms/mbfd/protocol/saml/descriptor")
-	if err != nil {
-		panic(err)
+	client := &http.Client{
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			println("Visit this URL To Authenticate:")
+			println("https://" + req.URL.Host + req.URL.EscapedPath() + "?" + req.URL.RawQuery)
+			return http.ErrUseLastResponse
+		},
 	}
+	client.Get("https://auth.otc.t-systems.com/authui/federation/websso?domain_id=a2e751a00b42478eaeee3588b9e02dd5&idp=otc&protocol=saml")
 
-	rawMetadata, err := ioutil.ReadAll(res.Body)
-	if err != nil {
-		panic(err)
-	}
-
-	type EntitiesDescriptor struct {
-		EntityDescriptor struct {
-			*types.EntityDescriptor
-		} `xml:"urn:oasis:names:tc:SAML:2.0:metadata EntityDescriptor"`
-	}
-
-	metadata := &EntitiesDescriptor{}
-	err = xml.Unmarshal(rawMetadata, metadata)
-	if err != nil {
-		panic(err)
-	}
-
-	certStore := dsig.MemoryX509CertificateStore{
-		Roots: []*x509.Certificate{},
-	}
-
-	for _, kd := range metadata.EntityDescriptor.IDPSSODescriptor.KeyDescriptors {
-		for idx, xcert := range kd.KeyInfo.X509Data.X509Certificates {
-			if xcert.Data == "" {
-				panic(fmt.Errorf("metadata certificate(%d) must not be empty", idx))
-			}
-			certData, err := base64.StdEncoding.DecodeString(xcert.Data)
-			if err != nil {
-				panic(err)
-			}
-
-			idpCert, err := x509.ParseCertificate(certData)
-			if err != nil {
-				panic(err)
-			}
-
-			certStore.Roots = append(certStore.Roots, idpCert)
-		}
-	}
-	//randomKeyStore := dsig.RandomKeyStoreForTest()
-	sp := &saml2.SAMLServiceProvider{
-		IdentityProviderSSOURL:      metadata.EntityDescriptor.IDPSSODescriptor.SingleSignOnServices[0].Location,
-		IdentityProviderIssuer:      metadata.EntityDescriptor.EntityID,
-		ServiceProviderIssuer:       "https://auth.otc.t-systems.com",
-		AssertionConsumerServiceURL: "http://localhost:8080/v1/_saml_callback",
-		AudienceURI:                 "https://auth.otc.t-systems.com",
-		IDPCertificateStore:         &certStore,
-		NameIdFormat:                "email",
-		//SPKeyStore:                  randomKeyStore,
-	}
+	//rawMetadata, err := ioutil.ReadAll( byte"res.Body")
+	//if err != nil {
+	//	panic(err)
+	//}
+	//
+	//type EntitiesDescriptor struct {
+	//	EntityDescriptor struct {
+	//		*types.EntityDescriptor
+	//	} `xml:"urn:oasis:names:tc:SAML:2.0:metadata EntityDescriptor"`
+	//}
+	//
+	//metadata := &EntitiesDescriptor{}
+	//err = xml.Unmarshal(rawMetadata, metadata)
+	//if err != nil {
+	//	panic(err)
+	//}
+	//
+	//certStore := dsig.MemoryX509CertificateStore{
+	//	Roots: []*x509.Certificate{},
+	//}
+	//
+	//for _, kd := range metadata.EntityDescriptor.IDPSSODescriptor.KeyDescriptors {
+	//	for idx, xcert := range kd.KeyInfo.X509Data.X509Certificates {
+	//		if xcert.Data == "" {
+	//			panic(fmt.Errorf("metadata certificate(%d) must not be empty", idx))
+	//		}
+	//		certData, err := base64.StdEncoding.DecodeString(xcert.Data)
+	//		if err != nil {
+	//			panic(err)
+	//		}
+	//
+	//		idpCert, err := x509.ParseCertificate(certData)
+	//		if err != nil {
+	//			panic(err)
+	//		}
+	//
+	//		certStore.Roots = append(certStore.Roots, idpCert)
+	//	}
+	//}
+	////randomKeyStore := dsig.RandomKeyStoreForTest()
+	//sp := &saml2.SAMLServiceProvider{
+	//	IdentityProviderSSOURL:      metadata.EntityDescriptor.IDPSSODescriptor.SingleSignOnServices[0].Location,
+	//	IdentityProviderIssuer:      metadata.EntityDescriptor.EntityID,
+	//	ServiceProviderIssuer:       "https://auth.otc.t-systems.com",
+	//	AssertionConsumerServiceURL: "http://localhost:8080/v1/_saml_callback",
+	//	AudienceURI:                 "https://auth.otc.t-systems.com",
+	//	IDPCertificateStore:         &certStore,
+	//	NameIdFormat:                "email",
+	//	//SPKeyStore:                  randomKeyStore,
+	//}
+	//var test string
 
 	http.HandleFunc("/v1/_saml_callback", func(rw http.ResponseWriter, req *http.Request) {
-		err := req.ParseForm()
-		if err != nil {
-			rw.WriteHeader(http.StatusBadRequest)
-			return
-		}
-		assertionInfo, err := sp.RetrieveAssertionInfo(req.FormValue("SAMLResponse"))
-		if err != nil {
-			rw.WriteHeader(http.StatusForbidden)
-			return
-		}
-
-		if assertionInfo.WarningInfo.InvalidTime {
-			rw.WriteHeader(http.StatusForbidden)
-			return
-		}
-
-		if assertionInfo.WarningInfo.NotInAudience {
-			rw.WriteHeader(http.StatusForbidden)
-			return
-		}
-
-		fmt.Fprintf(rw, "NameID: %s\n", assertionInfo.NameID)
-
-		fmt.Fprintf(rw, "Assertions:\n")
-
-		for key, val := range assertionInfo.Values {
-			fmt.Fprintf(rw, "  %s: %+v\n", key, val)
-		}
-
-		fmt.Fprintf(rw, "\n")
-
-		fmt.Fprintf(rw, "Warnings:\n")
-		fmt.Fprintf(rw, "%+v\n", assertionInfo.WarningInfo)
+		//err := req.ParseForm()
+		//if err != nil {
+		//	rw.WriteHeader(http.StatusBadRequest)
+		//	return
+		//}
+		//samlResponse := req.FormValue("SAMLResponse")
+		//decodeString, _ := base64.StdEncoding.DecodeString(samlResponse)
+		//samlResponseString := strings.ReplaceAll(string(decodeString), "http://localhost:8080/v1/_saml_callback", "https://auth.otc.t-systems.com/authui/saml/SAMLAssertionConsumer")
+		//samlResponeReady := url.QueryEscape(base64.StdEncoding.EncodeToString([]byte(samlResponseString)))
+		//test = "SAMLResponse=" + samlResponeReady
+		//client := new(http.Client)
+		//
+		//req2, err := http.NewRequest("POST", "https://iam.eu-de.otc.t-systems.com/v3.0/OS-FEDERATION/tokens", strings.NewReader(test))
+		//if err != nil {
+		//	Error(err)
+		//}
+		//req2.Header.Set("x-Idp-Id", "otc")
+		//req2.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		//post, err := client.Do(req2)
+		//if err != nil {
+		//	Error(err)
+		//}
+		//
+		//all, _ := ioutil.ReadAll(post.Body)
+		//fmt.Println(string(all))
 	})
 
-	println("Visit this URL To Authenticate:")
-	authURL, err := sp.BuildAuthURL("")
-	if err != nil {
-		panic(err)
-	}
+	//println("Visit this URL To Authenticate:")
+	//authURL, err := sp.BuildAuthURL("")
+	//if err != nil {
+	//	panic(err)
+	//}
+	//
+	//println(authURL)
+	//
+	//println("Supply:")
+	//fmt.Printf("SP ACS URL: %s\n", sp.AssertionConsumerServiceURL)
 
-	println(authURL)
-
-	println("Supply:")
-	fmt.Printf("SP ACS URL: %s\n", sp.AssertionConsumerServiceURL)
-
-	err = http.ListenAndServe(":8080", nil)
+	err := http.ListenAndServe(":8080", nil)
 	if err != nil {
 		panic(err)
 	}
@@ -263,6 +278,32 @@ func getSAMLIdentity() {
 	if err != nil {
 		Error(err)
 	}
+}
+
+type loggingResponseWriter struct {
+	status int
+	body   string
+	http.ResponseWriter
+}
+
+func (w *loggingResponseWriter) WriteHeader(code int) {
+	w.status = code
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *loggingResponseWriter) Write(body []byte) (int, error) {
+	w.body = string(body)
+	return w.ResponseWriter.Write(body)
+}
+
+func responseLogger(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		loggingRW := &loggingResponseWriter{
+			ResponseWriter: w,
+		}
+		h.ServeHTTP(loggingRW, r)
+		log.Println("Status : ", loggingRW.status, "Response : ", loggingRW.body)
+	})
 }
 
 func getIdentityClient() *golangsdk.ServiceClient {
