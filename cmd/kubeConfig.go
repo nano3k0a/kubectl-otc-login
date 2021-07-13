@@ -16,20 +16,24 @@ limitations under the License.
 package cmd
 
 import (
+	"bytes"
+	"compress/flate"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	golangsdk "github.com/opentelekomcloud/gophertelekomcloud"
 	"github.com/opentelekomcloud/gophertelekomcloud/openstack"
 	"github.com/opentelekomcloud/gophertelekomcloud/openstack/cce/v3/clusters"
 	"github.com/opentelekomcloud/gophertelekomcloud/openstack/identity/v3/users"
-	saml2 "github.com/russellhaering/gosaml2"
+	"io"
+	"net/url"
+	"strings"
+
+	//saml2 "github.com/russellhaering/gosaml2"
 	"github.com/spf13/cobra"
 	"io/ioutil"
 	"log"
 	"net/http"
-	"os/exec"
-	"runtime"
-
 	//"encoding/json"
 	"os"
 	"sigs.k8s.io/yaml"
@@ -150,134 +154,107 @@ func getProviderClient() *golangsdk.ProviderClient {
 	return provider
 }
 
-func openbrowser(url string) {
-	var err error
+func getSAMLIdentity() {
 
-	switch runtime.GOOS {
-	case "linux":
-		err = exec.Command("xdg-open", url).Start()
-	case "windows":
-		err = exec.Command("rundll32", "url.dll,FileProtocolHandler", url).Start()
-	case "darwin":
-		err = exec.Command("open", url).Start()
-	default:
-		err = fmt.Errorf("unsupported platform")
+	client := &http.Client{
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return createSAMLRequestLink(req)
+		},
 	}
+
+	client.Get("https://auth.otc.t-systems.com/authui/federation/websso?domain_id=a2e751a00b42478eaeee3588b9e02dd5&idp=otc&protocol=saml")
+
+	http.HandleFunc("/v1/_saml_callback", func(rw http.ResponseWriter, req *http.Request) {
+		err := req.ParseForm()
+		if err != nil {
+			rw.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		samlResponse := req.FormValue("SAMLResponse")
+		reqBytes, err := base64.StdEncoding.DecodeString(samlResponse)
+		if err != nil {
+			Error(err)
+		}
+
+		buf := new(bytes.Buffer)
+
+		decompressor := flate.NewReader(bytes.NewReader(reqBytes))
+		io.Copy(buf, decompressor)
+		decompressor.Close()
+		samlResponseXML := string(buf.Bytes())
+		samlResponseXML = strings.ReplaceAll(samlResponseXML, "http://localhost:8080/v1/_saml_callback", "https://auth.otc.t-systems.com/authui/saml/SAMLAssertionConsumer")
+		//fmt.Println(samlResponseXML)
+		buf.Reset()
+
+		compressor, _ := flate.NewWriter(buf, flate.BestCompression)
+		defer compressor.Close()
+		compressor.Write([]byte(samlResponseXML))
+		compressor.Flush()
+		samlResponseXML = base64.StdEncoding.EncodeToString(buf.Bytes())
+
+		req.URL.Query().Set("SAMLRequest", samlResponseXML)
+		u, _ := url.ParseQuery(req.URL.RawQuery)
+		u.Set("SAMLRequest", samlResponseXML)
+		req.URL.RawQuery = u.Encode()
+
+		r2 := req.Clone(req.Context())
+
+		//r2.Host = "auth.otc.t-systems.com"
+		//r2.URL.Host = "auth.otc.t-systems.com"
+		//r2.URL.Path = "/authui/saml/SAMLAssertionConsumer"
+		//samlResponeReady := url.QueryEscape(base64.StdEncoding.EncodeToString([]byte(samlResponseString)))
+		//test = "SAMLResponse=" + samlResponeReady
+		client := new(http.Client)
+		post, err := client.Do(r2)
+		if err != nil {
+			Error(err)
+		}
+		//
+		all, _ := ioutil.ReadAll(post.Body)
+		fmt.Println(string(all))
+	})
+
+	err := http.ListenAndServe(":8080", nil)
 	if err != nil {
-		log.Fatal(err)
+		Error(err)
 	}
 
 }
 
-func getSAMLIdentity() {
-	client := &http.Client{
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			println("Visit this URL To Authenticate:")
-			println("https://" + req.URL.Host + req.URL.EscapedPath() + "?" + req.URL.RawQuery)
-			return http.ErrUseLastResponse
-		},
-	}
-	client.Get("https://auth.otc.t-systems.com/authui/federation/websso?domain_id=a2e751a00b42478eaeee3588b9e02dd5&idp=otc&protocol=saml")
+func createSAMLRequestLink(req *http.Request) error {
+	println("Visit this URL To Authenticate:")
+	samlRequest := req.URL.Query().Get("SAMLRequest")
 
-	//rawMetadata, err := ioutil.ReadAll( byte"res.Body")
-	//if err != nil {
-	//	panic(err)
-	//}
-	//
-	//type EntitiesDescriptor struct {
-	//	EntityDescriptor struct {
-	//		*types.EntityDescriptor
-	//	} `xml:"urn:oasis:names:tc:SAML:2.0:metadata EntityDescriptor"`
-	//}
-	//
-	//metadata := &EntitiesDescriptor{}
-	//err = xml.Unmarshal(rawMetadata, metadata)
-	//if err != nil {
-	//	panic(err)
-	//}
-	//
-	//certStore := dsig.MemoryX509CertificateStore{
-	//	Roots: []*x509.Certificate{},
-	//}
-	//
-	//for _, kd := range metadata.EntityDescriptor.IDPSSODescriptor.KeyDescriptors {
-	//	for idx, xcert := range kd.KeyInfo.X509Data.X509Certificates {
-	//		if xcert.Data == "" {
-	//			panic(fmt.Errorf("metadata certificate(%d) must not be empty", idx))
-	//		}
-	//		certData, err := base64.StdEncoding.DecodeString(xcert.Data)
-	//		if err != nil {
-	//			panic(err)
-	//		}
-	//
-	//		idpCert, err := x509.ParseCertificate(certData)
-	//		if err != nil {
-	//			panic(err)
-	//		}
-	//
-	//		certStore.Roots = append(certStore.Roots, idpCert)
-	//	}
-	//}
-	////randomKeyStore := dsig.RandomKeyStoreForTest()
-	//sp := &saml2.SAMLServiceProvider{
-	//	IdentityProviderSSOURL:      metadata.EntityDescriptor.IDPSSODescriptor.SingleSignOnServices[0].Location,
-	//	IdentityProviderIssuer:      metadata.EntityDescriptor.EntityID,
-	//	ServiceProviderIssuer:       "https://auth.otc.t-systems.com",
-	//	AssertionConsumerServiceURL: "http://localhost:8080/v1/_saml_callback",
-	//	AudienceURI:                 "https://auth.otc.t-systems.com",
-	//	IDPCertificateStore:         &certStore,
-	//	NameIdFormat:                "email",
-	//	//SPKeyStore:                  randomKeyStore,
-	//}
-	//var test string
-
-	http.HandleFunc("/v1/_saml_callback", func(rw http.ResponseWriter, req *http.Request) {
-		//err := req.ParseForm()
-		//if err != nil {
-		//	rw.WriteHeader(http.StatusBadRequest)
-		//	return
-		//}
-		//samlResponse := req.FormValue("SAMLResponse")
-		//decodeString, _ := base64.StdEncoding.DecodeString(samlResponse)
-		//samlResponseString := strings.ReplaceAll(string(decodeString), "http://localhost:8080/v1/_saml_callback", "https://auth.otc.t-systems.com/authui/saml/SAMLAssertionConsumer")
-		//samlResponeReady := url.QueryEscape(base64.StdEncoding.EncodeToString([]byte(samlResponseString)))
-		//test = "SAMLResponse=" + samlResponeReady
-		//client := new(http.Client)
-		//
-		//req2, err := http.NewRequest("POST", "https://iam.eu-de.otc.t-systems.com/v3.0/OS-FEDERATION/tokens", strings.NewReader(test))
-		//if err != nil {
-		//	Error(err)
-		//}
-		//req2.Header.Set("x-Idp-Id", "otc")
-		//req2.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-		//post, err := client.Do(req2)
-		//if err != nil {
-		//	Error(err)
-		//}
-		//
-		//all, _ := ioutil.ReadAll(post.Body)
-		//fmt.Println(string(all))
-	})
-
-	//println("Visit this URL To Authenticate:")
-	//authURL, err := sp.BuildAuthURL("")
-	//if err != nil {
-	//	panic(err)
-	//}
-	//
-	//println(authURL)
-	//
-	//println("Supply:")
-	//fmt.Printf("SP ACS URL: %s\n", sp.AssertionConsumerServiceURL)
-
-	err := http.ListenAndServe(":8080", nil)
-	if err != nil {
-		panic(err)
-	}
-
+	reqBytes, err := base64.StdEncoding.DecodeString(samlRequest)
 	if err != nil {
 		Error(err)
 	}
+
+	buf := new(bytes.Buffer)
+
+	decompressor := flate.NewReader(bytes.NewReader(reqBytes))
+	io.Copy(buf, decompressor)
+	decompressor.Close()
+	samlResponseXML := string(buf.Bytes())
+	samlResponseXML = strings.Replace(samlResponseXML, "https://auth.otc.t-systems.com/authui/saml/SAMLAssertionConsumer", "http://localhost:8080/v1/_saml_callback", -1)
+	//fmt.Println(samlResponseXML)
+	buf.Reset()
+
+	compressor, _ := flate.NewWriter(buf, flate.BestCompression)
+	defer compressor.Close()
+	compressor.Write([]byte(samlResponseXML))
+	compressor.Flush()
+	samlResponseXML = base64.StdEncoding.EncodeToString(buf.Bytes())
+
+	fmt.Print("\nVisit this URL:")
+
+	req.URL.Query().Set("SAMLRequest", samlResponseXML)
+	u, _ := url.ParseQuery(req.URL.RawQuery)
+	u.Set("SAMLRequest", samlResponseXML)
+	req.URL.RawQuery = u.Encode()
+	println("https://" + req.URL.Host + req.URL.EscapedPath() + "?" + req.URL.RawQuery)
+	//fmt.Println(req.URL.Query().Get("SAMLRequest"))
+	return http.ErrUseLastResponse
 }
 
 type loggingResponseWriter struct {
