@@ -215,7 +215,7 @@ func replaceSAMLCallbackUrl(req *http.Request, oldSAMLUrl, newSAMLUrl string) st
 	decompressor.Close()
 	samlResponseXML := string(buf.Bytes())
 
-	samlResponseXML = strings.ReplaceAll(samlResponseXML, oldSAMLUrl, newSAMLUrl)
+	samlResponseXML = strings.ReplaceAll(samlResponse, oldSAMLUrl, newSAMLUrl)
 
 	compressor, _ := flate.NewWriter(buf, flate.BestCompression)
 	defer compressor.Close()
