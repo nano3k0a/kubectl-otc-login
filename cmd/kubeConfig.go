@@ -18,6 +18,7 @@ package cmd
 import (
 	"bytes"
 	"compress/flate"
+	"compress/gzip"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -165,53 +166,28 @@ func getSAMLIdentity() {
 	client.Get("https://auth.otc.t-systems.com/authui/federation/websso?domain_id=a2e751a00b42478eaeee3588b9e02dd5&idp=otc&protocol=saml")
 
 	http.HandleFunc("/v1/_saml_callback", func(rw http.ResponseWriter, req *http.Request) {
-		err := req.ParseForm()
-		if err != nil {
-			rw.WriteHeader(http.StatusBadRequest)
-			return
-		}
-		samlResponse := req.FormValue("SAMLResponse")
-		reqBytes, err := base64.StdEncoding.DecodeString(samlResponse)
-		if err != nil {
-			Error(err)
-		}
+		samlResponseXML := replaceSAMLCallbackUrl(req, "http://localhost:8080/v1/_saml_callback", "https://auth.otc.t-systems.com/authui/saml/SAMLAssertionConsumer")
 
-		buf := new(bytes.Buffer)
+		url := "https://auth.otc.t-systems.com/authui/saml/SAMLAssertionConsumer?SAMLResponse=" + url.QueryEscape(samlResponseXML)
 
-		decompressor := flate.NewReader(bytes.NewReader(reqBytes))
-		io.Copy(buf, decompressor)
-		decompressor.Close()
-		samlResponseXML := string(buf.Bytes())
-		samlResponseXML = strings.ReplaceAll(samlResponseXML, "http://localhost:8080/v1/_saml_callback", "https://auth.otc.t-systems.com/authui/saml/SAMLAssertionConsumer")
-		//fmt.Println(samlResponseXML)
-		buf.Reset()
+		proxyReq, err := http.NewRequest(req.Method, url, bytes.NewReader(readRequestBody(req)))
 
-		compressor, _ := flate.NewWriter(buf, flate.BestCompression)
-		defer compressor.Close()
-		compressor.Write([]byte(samlResponseXML))
-		compressor.Flush()
-		samlResponseXML = base64.StdEncoding.EncodeToString(buf.Bytes())
+		// We may want to filter some headers, otherwise we could just use a shallow copy
+		// proxyReq.Header = req.Header
+		copyHeaders(req, proxyReq)
 
-		req.URL.Query().Set("SAMLRequest", samlResponseXML)
-		u, _ := url.ParseQuery(req.URL.RawQuery)
-		u.Set("SAMLRequest", samlResponseXML)
-		req.URL.RawQuery = u.Encode()
-
-		r2 := req.Clone(req.Context())
-
-		//r2.Host = "auth.otc.t-systems.com"
-		//r2.URL.Host = "auth.otc.t-systems.com"
-		//r2.URL.Path = "/authui/saml/SAMLAssertionConsumer"
-		//samlResponeReady := url.QueryEscape(base64.StdEncoding.EncodeToString([]byte(samlResponseString)))
-		//test = "SAMLResponse=" + samlResponeReady
 		client := new(http.Client)
-		post, err := client.Do(r2)
+		resp, err := client.Do(proxyReq)
 		if err != nil {
 			Error(err)
 		}
-		//
-		all, _ := ioutil.ReadAll(post.Body)
-		fmt.Println(string(all))
+
+		reader, err := gzip.NewReader(resp.Body)
+		if err != nil {
+			Error(err)
+		}
+		defer reader.Close()
+		io.Copy(os.Stdout, reader)
 	})
 
 	err := http.ListenAndServe(":8080", nil)
@@ -219,6 +195,57 @@ func getSAMLIdentity() {
 		Error(err)
 	}
 
+}
+
+func replaceSAMLCallbackUrl(req *http.Request, oldSAMLUrl, newSAMLUrl string) string {
+	err := req.ParseForm()
+	if err != nil {
+		Error(err)
+	}
+	samlResponse := req.FormValue("SAMLResponse")
+	reqBytes, err := base64.StdEncoding.DecodeString(samlResponse)
+	if err != nil {
+		Error(err)
+	}
+
+	buf := new(bytes.Buffer)
+
+	decompressor := flate.NewReader(bytes.NewReader(reqBytes))
+	io.Copy(buf, decompressor)
+	decompressor.Close()
+	samlResponseXML := string(buf.Bytes())
+
+	samlResponseXML = strings.ReplaceAll(samlResponseXML, oldSAMLUrl, newSAMLUrl)
+
+	compressor, _ := flate.NewWriter(buf, flate.BestCompression)
+	defer compressor.Close()
+	compressor.Write([]byte(samlResponseXML))
+	compressor.Flush()
+	samlResponseXML = base64.StdEncoding.EncodeToString(buf.Bytes())
+	return samlResponseXML
+}
+
+func readRequestBody(req *http.Request) []byte {
+	body, err := ioutil.ReadAll(req.Body)
+	if err != nil {
+		Error(err)
+	}
+	return body
+}
+
+func readResponseBody(req *http.Response) []byte {
+	body, err := ioutil.ReadAll(req.Body)
+	if err != nil {
+		Error(err)
+	}
+	return body
+}
+
+func copyHeaders(source *http.Request, target *http.Request) {
+	target.Header = make(http.Header)
+	for h, val := range source.Header {
+		target.Header[h] = val
+	}
 }
 
 func createSAMLRequestLink(req *http.Request) error {
