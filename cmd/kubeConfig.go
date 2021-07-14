@@ -16,55 +16,82 @@ limitations under the License.
 package cmd
 
 import (
-	"bytes"
-	"compress/flate"
-	"encoding/base64"
 	"errors"
 	"fmt"
+	"io/ioutil"
+	"net/http"
+	"os"
+	"path/filepath"
+	"regexp"
+	"sigs.k8s.io/yaml"
+
 	golangsdk "github.com/opentelekomcloud/gophertelekomcloud"
 	"github.com/opentelekomcloud/gophertelekomcloud/openstack"
 	"github.com/opentelekomcloud/gophertelekomcloud/openstack/cce/v3/clusters"
 	"github.com/opentelekomcloud/gophertelekomcloud/openstack/identity/v3/users"
-	"io"
-	"net/url"
-	"strings"
-
-	//saml2 "github.com/russellhaering/gosaml2"
 	"github.com/spf13/cobra"
-	"io/ioutil"
-	"log"
-	"net/http"
-	//"encoding/json"
-	"os"
-	"sigs.k8s.io/yaml"
 )
 
-var ak string
-var sk string
-var path string
-var projectname string
-var clustername string
+const (
+	//https://docs.otc.t-systems.com/en-us/api/iam/iam_03_0002.html
+	queryPAK = "https://iam.eu-de.otc.t-systems.com/v3.0/OS-CREDENTIAL/credentials/"
+
+	//https://docs.otc.t-systems.com/en-us/api/iam/en-us_topic_0057845574.html
+	queryDomain = "https://iam.eu-de.otc.t-systems.com/v3/auth/domains"
+)
 
 // kubeConfigCmd represents the kubeConfig command
-var kubeConfigCmd = &cobra.Command{
-	Use:   "kubeConfig",
-	Short: "kubecConfig downloads the kubectl configuration file from open telekom cloud (otc)",
-	Long: `The kubectl configuration file with its ca, user certs and contexts is downloaded directly via the OTC API.
+var (
+	ak          string
+	sk          string
+	path        string
+	projectName string
+	clusterName string
+
+	kubeConfigCmd = &cobra.Command{
+		Use:   "kubeConfig",
+		Short: "kubecConfig downloads the kubectl configuration file from open telekom cloud (otc)",
+		Long: `The kubectl configuration file with its ca, user certs and contexts is downloaded directly via the OTC API.
            After the kubectl config file is download it is modified so that only in the context for the external cluster
            exists. The kubectl config file will then be saved in the desired path (default is: $HOME/.kube/config)
            Examples: kubectl-otc-login fetch kubeConfig --sk yoursecretkey --ak youraccesskey --path /desired/path
            `,
-	Run: main,
-}
+		Run: main,
+	}
+)
 
 func init() {
 	//rootCmd.AddCommand(fetchCmd)
 	fetchCmd.AddCommand(kubeConfigCmd)
 	fetchCmd.PersistentFlags().StringVar(&ak, "ak", "", "Access Key for OTC Authentication")
 	fetchCmd.PersistentFlags().StringVar(&sk, "sk", "", "Secret Key for OTC Authentication")
-	fetchCmd.PersistentFlags().StringVar(&projectname, "projectname", "eu-de", "Project name from OTC console")
-	fetchCmd.PersistentFlags().StringVar(&clustername, "clustername", "", "Name of the Cluster from OTC")
+	fetchCmd.PersistentFlags().StringVar(&projectName, "projectName", "eu-de", "Project name from OTC console (default: eu-de)")
+	fetchCmd.PersistentFlags().StringVar(&clusterName, "clusterName", "", "Name of the Cluster from OTC")
 	fetchCmd.PersistentFlags().StringVar(&path, "path", "~/.kube/config", "Path where to save the config (default: ~/.kube/config")
+}
+
+func verifyParameters() {
+	alphaNumeric := regexp.MustCompile("^[a-zA-Z0-9_]*$")
+
+	if ak == "" || !alphaNumeric.MatchString(ak) {
+		Error(errors.New("parameter access key (ak) not set or invalid"))
+	}
+
+	if sk == "" || !alphaNumeric.MatchString(ak) {
+		Error(errors.New("parameter secret key (sk) not set or invalid"))
+	}
+
+	if projectName == "" {
+		Error(errors.New("parameter projectName not set"))
+	}
+
+	if clusterName == "" {
+		Error(errors.New("parameter clusterName not set"))
+	}
+
+	if _, err := os.Stat(filepath.Dir(path)); err != nil {
+		Error(err)
+	}
 }
 
 type KubeConfig struct {
@@ -79,7 +106,7 @@ type KubeConfig struct {
 func NewKubeConfig() *KubeConfig {
 	providerClient := getProviderClient()
 	cceClient := getCCEClient()
-	cluster := getCluster(clustername, cceClient)
+	cluster := getCluster(cceClient)
 	cert := getCert()
 	contextName := getContextName(providerClient)
 	userName := getUserName(providerClient)
@@ -91,18 +118,17 @@ func NewKubeConfig() *KubeConfig {
 		cceClient:      cceClient,
 		cceCluster:     cluster,
 		kubeConfigCert: cert,
-		clusterName:    clustername,
+		clusterName:    clusterName,
 		contextName:    contextName,
 		userName:       userName,
 	}
 }
 
 func main(cmd *cobra.Command, args []string) {
+	verifyParameters()
 	cnf := NewKubeConfig()
 	cnf.prepareKubectlConfig()
 	cnf.writeKubeConfig()
-	getSAMLIdentity()
-
 }
 
 func (k *KubeConfig) prepareKubectlConfig() {
@@ -142,7 +168,7 @@ func (k *KubeConfig) writeKubeConfig() error {
 func getProviderClient() *golangsdk.ProviderClient {
 	opts := golangsdk.AKSKAuthOptions{
 		IdentityEndpoint: "https://iam.eu-de.otc.t-systems.com/",
-		ProjectName:      projectname,
+		ProjectName:      projectName,
 		SecretKey:        sk,
 		AccessKey:        ak,
 	}
@@ -154,140 +180,11 @@ func getProviderClient() *golangsdk.ProviderClient {
 	return provider
 }
 
-func getSAMLIdentity() {
-
-	client := &http.Client{
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			return createSAMLRequestLink(req)
-		},
-	}
-
-	client.Get("https://auth.otc.t-systems.com/authui/federation/websso?domain_id=a2e751a00b42478eaeee3588b9e02dd5&idp=otc&protocol=saml")
-
-	http.HandleFunc("/v1/_saml_callback", func(rw http.ResponseWriter, req *http.Request) {
-		err := req.ParseForm()
-		if err != nil {
-			rw.WriteHeader(http.StatusBadRequest)
-			return
-		}
-		samlResponse := req.FormValue("SAMLResponse")
-		reqBytes, err := base64.StdEncoding.DecodeString(samlResponse)
-		if err != nil {
-			Error(err)
-		}
-
-		buf := new(bytes.Buffer)
-
-		decompressor := flate.NewReader(bytes.NewReader(reqBytes))
-		io.Copy(buf, decompressor)
-		decompressor.Close()
-		samlResponseXML := string(buf.Bytes())
-		samlResponseXML = strings.ReplaceAll(samlResponseXML, "http://localhost:8080/v1/_saml_callback", "https://auth.otc.t-systems.com/authui/saml/SAMLAssertionConsumer")
-		//fmt.Println(samlResponseXML)
-		buf.Reset()
-
-		compressor, _ := flate.NewWriter(buf, flate.BestCompression)
-		defer compressor.Close()
-		compressor.Write([]byte(samlResponseXML))
-		compressor.Flush()
-		samlResponseXML = base64.StdEncoding.EncodeToString(buf.Bytes())
-
-		req.URL.Query().Set("SAMLRequest", samlResponseXML)
-		u, _ := url.ParseQuery(req.URL.RawQuery)
-		u.Set("SAMLRequest", samlResponseXML)
-		req.URL.RawQuery = u.Encode()
-
-		r2 := req.Clone(req.Context())
-
-		//r2.Host = "auth.otc.t-systems.com"
-		//r2.URL.Host = "auth.otc.t-systems.com"
-		//r2.URL.Path = "/authui/saml/SAMLAssertionConsumer"
-		//samlResponeReady := url.QueryEscape(base64.StdEncoding.EncodeToString([]byte(samlResponseString)))
-		//test = "SAMLResponse=" + samlResponeReady
-		client := new(http.Client)
-		post, err := client.Do(r2)
-		if err != nil {
-			Error(err)
-		}
-		//
-		all, _ := ioutil.ReadAll(post.Body)
-		fmt.Println(string(all))
-	})
-
-	err := http.ListenAndServe(":8080", nil)
-	if err != nil {
-		Error(err)
-	}
-
-}
-
-func createSAMLRequestLink(req *http.Request) error {
-	println("Visit this URL To Authenticate:")
-	samlRequest := req.URL.Query().Get("SAMLRequest")
-
-	reqBytes, err := base64.StdEncoding.DecodeString(samlRequest)
-	if err != nil {
-		Error(err)
-	}
-
-	buf := new(bytes.Buffer)
-
-	decompressor := flate.NewReader(bytes.NewReader(reqBytes))
-	io.Copy(buf, decompressor)
-	decompressor.Close()
-	samlResponseXML := string(buf.Bytes())
-	samlResponseXML = strings.Replace(samlResponseXML, "https://auth.otc.t-systems.com/authui/saml/SAMLAssertionConsumer", "http://localhost:8080/v1/_saml_callback", -1)
-	//fmt.Println(samlResponseXML)
-	buf.Reset()
-
-	compressor, _ := flate.NewWriter(buf, flate.BestCompression)
-	defer compressor.Close()
-	compressor.Write([]byte(samlResponseXML))
-	compressor.Flush()
-	samlResponseXML = base64.StdEncoding.EncodeToString(buf.Bytes())
-
-	fmt.Print("\nVisit this URL:")
-
-	req.URL.Query().Set("SAMLRequest", samlResponseXML)
-	u, _ := url.ParseQuery(req.URL.RawQuery)
-	u.Set("SAMLRequest", samlResponseXML)
-	req.URL.RawQuery = u.Encode()
-	println("https://" + req.URL.Host + req.URL.EscapedPath() + "?" + req.URL.RawQuery)
-	//fmt.Println(req.URL.Query().Get("SAMLRequest"))
-	return http.ErrUseLastResponse
-}
-
-type loggingResponseWriter struct {
-	status int
-	body   string
-	http.ResponseWriter
-}
-
-func (w *loggingResponseWriter) WriteHeader(code int) {
-	w.status = code
-	w.ResponseWriter.WriteHeader(code)
-}
-
-func (w *loggingResponseWriter) Write(body []byte) (int, error) {
-	w.body = string(body)
-	return w.ResponseWriter.Write(body)
-}
-
-func responseLogger(h http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		loggingRW := &loggingResponseWriter{
-			ResponseWriter: w,
-		}
-		h.ServeHTTP(loggingRW, r)
-		log.Println("Status : ", loggingRW.status, "Response : ", loggingRW.body)
-	})
-}
-
 func getIdentityClient() *golangsdk.ServiceClient {
 
 	opts := golangsdk.AKSKAuthOptions{
 		IdentityEndpoint: "https://iam.eu-de.otc.t-systems.com/",
-		ProjectName:      projectname,
+		ProjectName:      projectName,
 		Region:           "eu-de",
 		SecretKey:        sk,
 		AccessKey:        ak,
@@ -305,6 +202,7 @@ func getIdentityClient() *golangsdk.ServiceClient {
 	if err != nil {
 		Error(err)
 	}
+
 	return identityClient
 }
 
@@ -321,24 +219,25 @@ func getCCEClient() *golangsdk.ServiceClient {
 	return cceServiceClient
 }
 
-func getCluster(clusterName string, cceClient *golangsdk.ServiceClient) []clusters.Clusters {
+func getCluster(cceClient *golangsdk.ServiceClient) []clusters.Clusters {
 	listOpts := clusters.ListOpts{
 		Name: clusterName,
 	}
-	singleCluster, err := clusters.List(cceClient, listOpts) //TODO Fetch only one cluster not a whole list, user needs to provide clustername
+
+	singleCluster, err := clusters.List(cceClient, listOpts)
 	if err != nil {
 		Error(err)
 	}
 
 	if len(singleCluster) == 0 {
-		Error(errors.New("Cluster Slice is empty!"))
+		Error(errors.New("cluster Slice is empty"))
 	}
 	return singleCluster
 }
 
 func getCert() *clusters.Certificate {
 	cceClient := getCCEClient()
-	cluster := getCluster(clustername, cceClient)
+	cluster := getCluster(cceClient)
 	var err error
 	kubeConfigCert, err := clusters.GetCert(cceClient, cluster[0].Metadata.Id).Extract()
 	if err != nil {
@@ -361,7 +260,7 @@ func getUserName(provider *golangsdk.ProviderClient) string {
 		JSONResponse: user,
 		OkCodes:      []int{200},
 	}
-	resp, err := provider.Request("GET", "https://iam.eu-de.otc.t-systems.com/v3.0/OS-CREDENTIAL/credentials/"+ak, rOpts)
+	resp, err := provider.Request("GET", queryPAK+ak, rOpts)
 	if err != nil {
 		Error(err)
 	}
@@ -390,30 +289,29 @@ type Domain struct {
 }
 
 func getContextName(provider *golangsdk.ProviderClient) string {
-
 	//"OTC-123542-eu-de-pfau-infrastructure"
 	domain := new(Domain)
 	opts := &golangsdk.RequestOpts{
 		JSONResponse: domain,
 		OkCodes:      []int{200},
 	}
-	resp, err := provider.Request("GET", "https://iam.eu-de.otc.t-systems.com/v3/auth/domains", opts)
+	resp, err := provider.Request("GET", queryDomain, opts)
 	if err != nil {
 		Error(err)
 	}
+
 	if resp.StatusCode != http.StatusOK {
 		Error(errors.New("GET request failed, status: " + resp.Status))
 	}
 
 	if len(domain.Domains) == 0 {
-		Error(errors.New("Retrieve domain List is empty"))
+		Error(errors.New("retrieved domain List is empty"))
 	}
 
-	return domain.Domains[0].Name + "-" + projectname + "-" + clustername
+	return domain.Domains[0].Name + "-" + projectName + "-" + clusterName
 }
 
-//Helper functions
-
+// Error is a helper function to handle errors
 func Error(e error) {
 	fmt.Println(e)
 	os.Exit(1)
